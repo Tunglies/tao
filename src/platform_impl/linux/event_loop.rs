@@ -284,6 +284,15 @@ impl<T: 'static> EventLoop<T> {
     let mut taskbar = TaskbarIndicator::new();
     let is_wayland = window_target.is_wayland();
 
+    // Receive portal events
+    #[cfg(feature = "dbus")]
+    {
+      let tx_requests_clone = window_target.window_requests_tx.clone();
+      if let Err(e) = super::portal::receive_theme_changed(tx_requests_clone) {
+        log::debug!("Unable to receive theme changed events: {e}");
+      }
+    }
+
     // Window Request
     window_requests_rx.attach(Some(&context), move |(id, request)| {
       if let Some(window) = app_.window_by_id(id.0) {
@@ -947,9 +956,15 @@ impl<T: 'static> EventLoop<T> {
           }
           WindowRequest::SetTheme(theme) => {
             if let Some(settings) = Settings::default() {
-              match theme {
-                Some(Theme::Dark) => settings.set_gtk_application_prefer_dark_theme(true),
-                Some(Theme::Light) | None => settings.set_gtk_application_prefer_dark_theme(false),
+              settings.set_gtk_application_prefer_dark_theme(theme == Some(Theme::Dark));
+              if let Err(e) = event_tx.send(Event::WindowEvent {
+                window_id: RootWindowId(id),
+                event: WindowEvent::ThemeChanged(theme.unwrap_or_default()),
+              }) {
+                log::warn!(
+                  "Failed to send window theme changed event to event channel: {}",
+                  e
+                );
               }
             }
           }
@@ -1033,6 +1048,15 @@ impl<T: 'static> EventLoop<T> {
         let draws = &self.draws;
 
         window_target.p.app.activate();
+
+        // If this is a secondary (remote) GIO instance, the activate signal
+        // was forwarded to the primary instance via D-Bus. Exit immediately so
+        // the primary can handle focus (e.g. bring its window to front).
+        // Without this, the secondary hangs forever waiting for a StartCause::Init
+        // event that never arrives (connect_activate only fires on the primary).
+        if window_target.p.app.is_remote() {
+          return 0;
+        }
 
         let mut state = EventState::NewStart;
         let exit_code = loop {
