@@ -192,6 +192,16 @@ impl Handler {
     mem::take(&mut *self.redraw())
   }
 
+  fn remove_pending_redraw(&self, window_id: WindowId) {
+    let mut pending_redraw = self.redraw();
+    if let Some(position) = pending_redraw
+      .iter()
+      .position(|pending| *pending == window_id)
+    {
+      pending_redraw.remove(position);
+    }
+  }
+
   fn get_in_callback(&self) -> bool {
     self.in_callback.load(Ordering::Acquire)
   }
@@ -364,7 +374,15 @@ impl AppState {
   }
 
   pub fn handle_redraw(window_id: WindowId) {
+    HANDLER.remove_pending_redraw(window_id);
     HANDLER.handle_nonuser_event(EventWrapper::StaticEvent(Event::RedrawRequested(window_id)));
+  }
+
+  pub fn handle_event(wrapper: EventWrapper) {
+    if !util::is_main_thread() {
+      panic!("Event handled from different thread: {:#?}", wrapper);
+    }
+    HANDLER.handle_nonuser_event(wrapper);
   }
 
   pub fn queue_event(wrapper: EventWrapper) {

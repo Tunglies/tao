@@ -9,6 +9,7 @@ use std::{
   sync::{Arc, Weak},
 };
 
+use dpi::PhysicalSize;
 use objc2::{
   msg_send,
   rc::Retained,
@@ -115,11 +116,23 @@ impl WindowDelegateState {
   }
 
   pub fn emit_resize_event(&mut self) {
-    let rect = NSView::frame(&self.ns_view());
-    let scale_factor = self.get_scale_factor();
-    let logical_size = LogicalSize::new(rect.size.width as f64, rect.size.height as f64);
-    let size = logical_size.to_physical(scale_factor);
+    let size = self.current_inner_size();
     self.emit_event(WindowEvent::Resized(size));
+  }
+
+  fn emit_resize_event_immediately(&mut self) {
+    let size = self.current_inner_size();
+    AppState::handle_event(EventWrapper::StaticEvent(Event::WindowEvent {
+      window_id: WindowId(get_window_id(&self.ns_window)),
+      event: WindowEvent::Resized(size),
+    }));
+  }
+
+  fn emit_event_immediately(&mut self, event: WindowEvent<'static>) {
+    AppState::handle_event(EventWrapper::StaticEvent(Event::WindowEvent {
+      window_id: WindowId(get_window_id(&self.ns_window)),
+      event,
+    }));
   }
 
   fn emit_move_event(&mut self) {
@@ -133,6 +146,31 @@ impl WindowDelegateState {
       let physical_pos = LogicalPosition::<f64>::from((x, y)).to_physical(scale_factor);
       self.emit_event(WindowEvent::Moved(physical_pos));
     }
+  }
+
+  fn emit_move_event_immediately(&mut self) {
+    let rect = NSWindow::frame(&self.ns_window);
+    let x = rect.origin.x as f64;
+    let y = util::bottom_left_to_top_left(rect);
+    let moved = self.previous_position != Some((x, y));
+    if moved {
+      self.previous_position = Some((x, y));
+      let scale_factor = self.get_scale_factor();
+      let physical_pos = LogicalPosition::<f64>::from((x, y)).to_physical(scale_factor);
+      self.emit_event_immediately(WindowEvent::Moved(physical_pos));
+    }
+  }
+
+  fn emit_live_resize_events(&mut self) {
+    self.emit_resize_event_immediately();
+    self.emit_move_event_immediately();
+  }
+
+  fn current_inner_size(&self) -> PhysicalSize<u32> {
+    let rect = NSView::frame(&self.ns_view());
+    let scale_factor = self.get_scale_factor();
+    let logical_size = LogicalSize::new(rect.size.width as f64, rect.size.height as f64);
+    logical_size.to_physical(scale_factor)
   }
 
   fn get_scale_factor(&self) -> f64 {
@@ -347,8 +385,12 @@ extern "C" fn window_did_resize(this: &Object, _: Sel, _: id) {
   trace!("Triggered `windowDidResize:`");
   with_state(this, |state| {
     if !state.is_checking_zoomed_in {
-      state.emit_resize_event();
-      state.emit_move_event();
+      if unsafe { state.ns_window.inLiveResize() } {
+        state.emit_live_resize_events();
+      } else {
+        state.emit_resize_event();
+        state.emit_move_event();
+      }
     }
   });
   trace!("Completed `windowDidResize:`");
