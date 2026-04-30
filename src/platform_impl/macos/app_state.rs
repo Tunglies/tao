@@ -411,12 +411,12 @@ impl AppState {
       };
     }
     HANDLER.update_start_time();
-    match HANDLER.get_old_and_new_control_flow() {
-      (ControlFlow::ExitWithCode(_), _) | (_, ControlFlow::ExitWithCode(_)) => (),
-      (old, new) if old == new => (),
-      (_, ControlFlow::Wait) => HANDLER.waker().stop(),
-      (_, ControlFlow::WaitUntil(instant)) => HANDLER.waker().start_at(instant),
-      (_, ControlFlow::Poll) => HANDLER.waker().start(),
+    let control_flow = HANDLER.get_old_and_new_control_flow().1;
+    match control_flow {
+      ControlFlow::ExitWithCode(_) => (),
+      ControlFlow::Wait => HANDLER.waker().stop(),
+      ControlFlow::WaitUntil(instant) => HANDLER.waker().start_at(instant),
+      ControlFlow::Poll => HANDLER.waker().start(),
     }
   }
 }
