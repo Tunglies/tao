@@ -10,12 +10,20 @@ use tao::{
   window::WindowBuilder,
 };
 
+#[cfg(target_os = "macos")]
+use tao::platform::macos::WindowExtMacOS;
+
 #[allow(clippy::single_match)]
 fn main() {
   env_logger::init();
   let event_loop = EventLoop::new();
 
   let mut decorations = true;
+  #[cfg(target_os = "macos")]
+  let mut rounded_corners = true;
+
+  #[cfg(target_os = "macos")]
+  println!("Press R to toggle rounded corners while decorations are disabled.");
 
   let window = WindowBuilder::new()
     .with_title("Hit space to toggle decorations.")
@@ -42,6 +50,20 @@ fn main() {
           decorations = !decorations;
           println!("Decorations: {decorations}");
           window.set_decorations(decorations);
+        }
+        #[cfg(target_os = "macos")]
+        WindowEvent::KeyboardInput {
+          event:
+            KeyEvent {
+              physical_key: KeyCode::KeyR,
+              state: ElementState::Released,
+              ..
+            },
+          ..
+        } => {
+          rounded_corners = !rounded_corners;
+          println!("Rounded corners: {rounded_corners}");
+          window.set_rounded_corners(rounded_corners);
         }
         _ => (),
       },
