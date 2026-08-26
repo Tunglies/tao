@@ -101,6 +101,7 @@ pub struct PlatformSpecificWindowBuilderAttributes {
   pub resize_increments: Option<LogicalSize<f64>>,
   pub disallow_hidpi: bool,
   pub has_shadow: bool,
+  pub rounded_corners: bool,
   pub traffic_light_inset: Option<Position>,
   pub automatic_tabbing: bool,
   pub tabbing_identifier: Option<String>,
@@ -120,6 +121,7 @@ impl Default for PlatformSpecificWindowBuilderAttributes {
       resize_increments: None,
       disallow_hidpi: false,
       has_shadow: true,
+      rounded_corners: true,
       traffic_light_inset: None,
       automatic_tabbing: true,
       tabbing_identifier: None,
@@ -213,7 +215,10 @@ fn create_window(
       }
     };
 
-    let mut masks = if !attrs.decorations && screen.is_none() || pl_attrs.titlebar_hidden {
+    let rounded_corners = !attrs.decorations && pl_attrs.rounded_corners;
+    let mut masks = if !rounded_corners
+      && ((!attrs.decorations && screen.is_none()) || pl_attrs.titlebar_hidden)
+    {
       // Resizable UnownedWindow without a titlebar or borders
       // if decorations is set to false, ignore pl_attrs
       NSWindowStyleMask::Borderless
@@ -239,7 +244,7 @@ fn create_window(
       masks &= !NSWindowStyleMask::Closable;
     }
 
-    if pl_attrs.fullsize_content_view {
+    if rounded_corners || pl_attrs.fullsize_content_view {
       masks |= NSWindowStyleMask::FullSizeContentView;
     }
 
@@ -263,13 +268,13 @@ fn create_window(
       ns_window.setTitle(&title);
       ns_window.setAcceptsMouseMovedEvents(true);
 
-      if pl_attrs.titlebar_transparent {
+      if rounded_corners || pl_attrs.titlebar_transparent {
         ns_window.setTitlebarAppearsTransparent(true);
       }
-      if pl_attrs.title_hidden {
+      if rounded_corners || pl_attrs.title_hidden {
         ns_window.setTitleVisibility(appkit::NSWindowTitleVisibility::Hidden);
       }
-      if pl_attrs.titlebar_buttons_hidden {
+      if rounded_corners || pl_attrs.titlebar_buttons_hidden {
         for titlebar_button in &[
           NSWindowFullScreenButton,
           NSWindowButton::MiniaturizeButton,
@@ -503,6 +508,8 @@ pub struct UnownedWindow {
   input_context: IdRef,              // never changes
   pub shared_state: Arc<Mutex<SharedState>>,
   decorations: AtomicBool,
+  rounded_corners: AtomicBool,
+  rounded_corners_active: AtomicBool,
   cursor_state: Weak<Mutex<CursorState>>,
   transparent: bool,
   pub inner_rect: Option<PhysicalSize<u32>>,
@@ -599,6 +606,8 @@ impl UnownedWindow {
       input_context,
       shared_state: Arc::new(Mutex::new(win_attribs.into())),
       decorations: AtomicBool::new(decorations),
+      rounded_corners: AtomicBool::new(pl_attribs.rounded_corners),
+      rounded_corners_active: AtomicBool::new(!decorations && pl_attribs.rounded_corners),
       cursor_state,
       inner_rect,
       transparent,
@@ -647,6 +656,19 @@ impl UnownedWindow {
 
   fn set_style_mask_sync(&self, mask: NSWindowStyleMask) {
     unsafe { util::set_style_mask_sync(&self.ns_window, &self.ns_view, mask) };
+  }
+
+  fn set_decorations_async(&self, mask: NSWindowStyleMask, rounded_corners: bool) {
+    let was_rounded = self
+      .rounded_corners_active
+      .swap(rounded_corners, Ordering::AcqRel);
+    if was_rounded == rounded_corners {
+      self.set_style_mask_async(mask);
+    } else {
+      unsafe {
+        util::set_decorations_async(&self.ns_window, &self.ns_view, mask, rounded_corners);
+      }
+    }
   }
 
   pub fn id(&self) -> Id {
@@ -1003,11 +1025,18 @@ impl UnownedWindow {
       .saved_style
       .take()
       .unwrap_or_else(|| unsafe { self.ns_window.styleMask() });
-    if shared_state.resizable {
+    let mut mask = if shared_state.resizable {
       base_mask | NSWindowStyleMask::Resizable
     } else {
       base_mask & !NSWindowStyleMask::Resizable
+    };
+    if !self.decorations.load(Ordering::Acquire) {
+      mask &= !NSWindowStyleMask::Titled;
+      if self.rounded_corners.load(Ordering::Acquire) {
+        mask |= NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView;
+      }
     }
+    mask
   }
 
   /// This is called when the window is exiting fullscreen, whether by the
@@ -1021,11 +1050,13 @@ impl UnownedWindow {
 
     let maximized = shared_state_lock.maximized;
     let mask = self.saved_style(&mut *shared_state_lock);
+    let decorations = self.decorations.load(Ordering::Acquire);
+    let rounded_corners = self.rounded_corners.load(Ordering::Acquire);
+    self.set_decorations_async(mask, !decorations && rounded_corners);
 
     drop(shared_state_lock);
     trace!("Unlocked shared state in `restore_state_from_fullscreen`");
 
-    self.set_style_mask_async(mask);
     self.set_maximized(maximized);
   }
 
@@ -1338,41 +1369,37 @@ impl UnownedWindow {
 
   #[inline]
   pub fn set_decorations(&self, decorations: bool) {
+    trace!("Locked shared state in `set_decorations`");
+    let mut shared_state_lock = self.shared_state.lock().unwrap();
     if decorations != self.decorations.load(Ordering::Acquire) {
       self.decorations.store(decorations, Ordering::Release);
 
-      let (fullscreen, resizable) = {
-        trace!("Locked shared state in `set_decorations`");
-        let shared_state_lock = self.shared_state.lock().unwrap();
-        trace!("Unlocked shared state in `set_decorations`");
-        (
-          shared_state_lock.fullscreen.is_some(),
-          shared_state_lock.resizable,
-        )
+      let rounded_corners = !decorations && self.rounded_corners.load(Ordering::Acquire);
+      let mut new_mask = if decorations || rounded_corners {
+        NSWindowStyleMask::Closable
+          | NSWindowStyleMask::Miniaturizable
+          | NSWindowStyleMask::Resizable
+          | NSWindowStyleMask::Titled
+      } else {
+        NSWindowStyleMask::Borderless | NSWindowStyleMask::Resizable
       };
-
-      // If we're in fullscreen mode, we wait to apply decoration changes
-      // until we're in `window_did_exit_fullscreen`.
-      if fullscreen {
-        return;
+      if !shared_state_lock.resizable {
+        new_mask &= !NSWindowStyleMask::Resizable;
       }
 
-      let new_mask = {
-        let mut new_mask = if decorations {
-          NSWindowStyleMask::Closable
-            | NSWindowStyleMask::Miniaturizable
-            | NSWindowStyleMask::Resizable
-            | NSWindowStyleMask::Titled
-        } else {
-          NSWindowStyleMask::Borderless | NSWindowStyleMask::Resizable
-        };
-        if !resizable {
-          new_mask &= !NSWindowStyleMask::Resizable;
+      // If we're in fullscreen mode, we wait to apply decoration changes
+      // until we exit fullscreen.
+      if shared_state_lock.fullscreen.is_some() || shared_state_lock.is_simple_fullscreen {
+        shared_state_lock.saved_style = Some(new_mask);
+      } else {
+        if rounded_corners {
+          new_mask |= NSWindowStyleMask::FullSizeContentView;
         }
-        new_mask
-      };
-      self.set_style_mask_async(new_mask);
+        self.set_decorations_async(new_mask, rounded_corners);
+      }
     }
+    drop(shared_state_lock);
+    trace!("Unlocked shared state in `set_decorations`");
   }
 
   #[inline]
@@ -1639,7 +1666,9 @@ impl WindowExtMacOS for UnownedWindow {
         true
       } else {
         let new_mask = self.saved_style(&mut *shared_state_lock);
-        self.set_style_mask_async(new_mask);
+        let decorations = self.decorations.load(Ordering::Acquire);
+        let rounded_corners = self.rounded_corners.load(Ordering::Acquire);
+        self.set_decorations_async(new_mask, !decorations && rounded_corners);
         shared_state_lock.is_simple_fullscreen = false;
 
         if let Some(presentation_opts) = shared_state_lock.save_presentation_opts {
@@ -1663,6 +1692,27 @@ impl WindowExtMacOS for UnownedWindow {
   #[inline]
   fn set_has_shadow(&self, has_shadow: bool) {
     self.ns_window.setHasShadow(has_shadow)
+  }
+
+  #[inline]
+  fn set_rounded_corners(&self, rounded_corners: bool) {
+    let shared_state_lock = self.shared_state.lock().unwrap();
+    if rounded_corners != self.rounded_corners.load(Ordering::Acquire) {
+      self
+        .rounded_corners
+        .store(rounded_corners, Ordering::Release);
+      if !self.decorations.load(Ordering::Acquire)
+        && shared_state_lock.fullscreen.is_none()
+        && !shared_state_lock.is_simple_fullscreen
+      {
+        self
+          .rounded_corners_active
+          .store(rounded_corners, Ordering::Release);
+        unsafe {
+          util::set_rounded_corners_async(&self.ns_window, &self.ns_view, rounded_corners);
+        }
+      }
+    }
   }
 
   #[inline]

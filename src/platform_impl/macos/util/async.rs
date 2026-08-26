@@ -10,7 +10,10 @@ use std::{
 use core_graphics::base::CGFloat;
 use dispatch2::{DispatchQueue, DispatchQueueAttr};
 use objc2::{rc::autoreleasepool, Message};
-use objc2_app_kit::{NSScreen, NSView, NSWindow, NSWindowStyleMask};
+use objc2_app_kit::{
+  NSScreen, NSView, NSWindow, NSWindowButton, NSWindowFullScreenButton, NSWindowStyleMask,
+  NSWindowTitleVisibility,
+};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
 
 use crate::{
@@ -83,6 +86,59 @@ pub unsafe fn set_style_mask_sync(ns_window: &NSWindow, ns_view: &NSView, mask: 
   }
 }
 
+unsafe fn set_titlebar_for_rounded_corners(ns_window: &NSWindow, rounded_corners: bool) {
+  ns_window.setTitleVisibility(if rounded_corners {
+    NSWindowTitleVisibility::Hidden
+  } else {
+    NSWindowTitleVisibility::Visible
+  });
+  ns_window.setTitlebarAppearsTransparent(rounded_corners);
+  for button in [
+    NSWindowFullScreenButton,
+    NSWindowButton::MiniaturizeButton,
+    NSWindowButton::CloseButton,
+    NSWindowButton::ZoomButton,
+  ] {
+    if let Some(button) = ns_window.standardWindowButton(button) {
+      button.setHidden(rounded_corners);
+    }
+  }
+}
+
+pub(crate) unsafe fn set_decorations_async(
+  ns_window: &NSWindow,
+  ns_view: &NSView,
+  mask: NSWindowStyleMask,
+  rounded_corners: bool,
+) {
+  let ns_window = MainThreadSafe(ns_window.retain());
+  let ns_view = MainThreadSafe(ns_view.retain());
+  DispatchQueue::main().exec_async(move || {
+    set_style_mask(&ns_window, &ns_view, mask);
+    set_titlebar_for_rounded_corners(&ns_window, rounded_corners);
+  });
+}
+
+pub(crate) unsafe fn set_rounded_corners_async(
+  ns_window: &NSWindow,
+  ns_view: &NSView,
+  rounded_corners: bool,
+) {
+  let ns_window = MainThreadSafe(ns_window.retain());
+  let ns_view = MainThreadSafe(ns_view.retain());
+  DispatchQueue::main().exec_async(move || {
+    let mut mask = ns_window.styleMask();
+    if rounded_corners {
+      mask |= NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView;
+    } else {
+      // `FullSizeContentView` may have been enabled separately.
+      mask &= !NSWindowStyleMask::Titled;
+    }
+    set_style_mask(&ns_window, &ns_view, mask);
+    set_titlebar_for_rounded_corners(&ns_window, rounded_corners);
+  });
+}
+
 // `setContentSize:` isn't thread-safe either, though it doesn't log any errors
 // and just fails silently. Anyway, GCD to the rescue!
 pub unsafe fn set_content_size_async(ns_window: &NSWindow, size: LogicalSize<f64>) {
@@ -132,7 +188,7 @@ pub unsafe fn toggle_full_screen_async(
         if let Some(shared_state) = shared_state.upgrade() {
           trace!("Locked shared state in `toggle_full_screen_callback`");
           let mut shared_state_lock = shared_state.lock().unwrap();
-          shared_state_lock.saved_style = Some(curr_mask);
+          shared_state_lock.saved_style.get_or_insert(curr_mask);
           trace!("Unlocked shared state in `toggle_full_screen_callback`");
         }
       }

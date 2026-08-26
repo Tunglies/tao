@@ -46,6 +46,9 @@ pub trait WindowExtMacOS {
   /// Sets whether or not the window has shadow.
   fn set_has_shadow(&self, has_shadow: bool);
 
+  /// Sets whether an undecorated window uses AppKit's native rounded frame.
+  fn set_rounded_corners(&self, _rounded_corners: bool) {}
+
   /// Set the window traffic light position relative to the upper left corner
   fn set_traffic_light_inset<P: Into<Position>>(&self, position: P);
   /// Put the window in a state which indicates a file save is required.
@@ -115,6 +118,11 @@ impl WindowExtMacOS for Window {
   #[inline]
   fn set_has_shadow(&self, has_shadow: bool) {
     self.window.set_has_shadow(has_shadow)
+  }
+
+  #[inline]
+  fn set_rounded_corners(&self, rounded_corners: bool) {
+    self.window.set_rounded_corners(rounded_corners)
   }
 
   #[inline]
@@ -211,6 +219,13 @@ pub trait WindowBuilderExtMacOS {
   fn with_disallow_hidpi(self, disallow_hidpi: bool) -> WindowBuilder;
   /// Sets whether or not the window has shadow.
   fn with_has_shadow(self, has_shadow: bool) -> WindowBuilder;
+  /// Sets whether an undecorated window uses AppKit's native rounded frame. Defaults to `true`.
+  fn with_rounded_corners(self, _rounded_corners: bool) -> Self
+  where
+    Self: Sized,
+  {
+    self
+  }
   /// Sets the traffic light position to (x, y) relative to the upper left corner
   fn with_traffic_light_inset<P: Into<Position>>(self, inset: P) -> WindowBuilder;
   /// Sets whether the system can automatically organize windows into tabs.
@@ -282,6 +297,12 @@ impl WindowBuilderExtMacOS for WindowBuilder {
   #[inline]
   fn with_has_shadow(mut self, has_shadow: bool) -> WindowBuilder {
     self.platform_specific.has_shadow = has_shadow;
+    self
+  }
+
+  #[inline]
+  fn with_rounded_corners(mut self, rounded_corners: bool) -> Self {
+    self.platform_specific.rounded_corners = rounded_corners;
     self
   }
 
